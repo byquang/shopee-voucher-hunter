@@ -4,10 +4,11 @@ import json
 import os
 import re
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from html import escape
 from http.client import HTTPException
 from pathlib import Path
+from time import sleep
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -16,8 +17,11 @@ from sources import SOURCE_URL, VIETNAM, SourceError, Voucher, parse_vouchers
 MAX_PER_ALERT = 10
 PAGE_LIMIT = 2 * 1024 * 1024
 STATE_PATH = Path("seen.json")
+REMINDER_STATE_PATH = Path("reminders.json")
 USER_AGENT = "ShopeeVoucherHunter/1.0 (+https://github.com/byquang/shopee-voucher-hunter)"
-TIME_PREFIX = re.compile(r"^([0-2]?\dH(?:\d{2})?(?:\s*[-–,]\s*[0-2]?\dH(?:\d{2})?)*)\s*:\s*", re.I)
+CLAIM_TIME = r"(?:[01]?\d|2[0-3])(?:H(?:[0-5]\d)?|:[0-5]\d)"
+TIME_PREFIX = re.compile(rf"^({CLAIM_TIME}(?:\s*[-–,]\s*{CLAIM_TIME})*)\s*:\s*", re.I)
+REMINDER_LEAD = timedelta(minutes=5)
 DISCOUNT_AMOUNT = re.compile(r"\b(?:giảm|hoàn)\s+(\d+(?:[.,]\d+)*\s*(?:%|₫|đ\b|k\b|tr\b|triệu\b))", re.I)
 
 
@@ -160,6 +164,51 @@ def render_alert(today: date, vouchers: list[Voucher], *, preview: bool = False)
     return "\n\n".join(sections)
 
 
+def due_reminders(page: bytes, now: datetime) -> dict[datetime, dict[str, Voucher]]:
+    upcoming = now + REMINDER_LEAD
+    due = {}
+    for day in sorted({now.date(), upcoming.date()}):
+        for voucher in parse_vouchers(page, day):
+            schedule = TIME_PREFIX.match(voucher.terms)
+            if not schedule:
+                continue
+            for value in re.findall(CLAIM_TIME, schedule[1], re.I):
+                hour, minute = re.split(r"[H:]", value, flags=re.I)
+                slot = datetime.combine(day, time(int(hour), int(minute or "0")), VIETNAM)
+                if now < slot <= upcoming:
+                    key = hashlib.sha256(f"{slot.isoformat()}:{offer_key(voucher)}".encode()).hexdigest()
+                    due.setdefault(slot, {})[key] = voucher
+    return due
+
+
+def render_reminder(slot: datetime, vouchers: list[Voucher]) -> str:
+    sections = [f"⏰ <b>SẮP MỞ VOUCHER SHOPEE</b>\n<i>{slot:%H:%M} giờ Việt Nam · {len(vouchers)} ưu đãi</i>"]
+    sections.extend(render_voucher(index, voucher) for index, voucher in enumerate(vouchers, start=1))
+    sections.append("<i>Lượt có thể hết nhanh; kiểm tra điều kiện trong Shopee.</i>")
+    return "\n\n".join(sections)
+
+
+def remind(path: Path) -> None:
+    credentials = telegram_config()
+    page = fetch_source()
+    now = datetime.now(VIETNAM)
+    seen = read_seen(path, now.date())
+    sent = 0
+    for slot, offers in sorted(due_reminders(page, now).items()):
+        pending = [(key, voucher) for key, voucher in offers.items() if key not in seen]
+        for start in range(0, len(pending), MAX_PER_ALERT):
+            if sent:
+                sleep(1.1)
+            if datetime.now(VIETNAM) >= slot:
+                break
+            batch = dict(pending[start:start + MAX_PER_ALERT])
+            send_telegram(*credentials, render_reminder(slot, list(batch.values())))
+            seen.update(batch)
+            save_seen(path, now.date(), seen)
+            sent += len(batch)
+    print(f"Sent reminders for {sent} voucher(s)." if sent else "No voucher reminders due.")
+
+
 def hunt(path: Path, dry_run: bool) -> None:
     credentials = () if dry_run else telegram_config()
     page = fetch_source()
@@ -189,7 +238,8 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Preview source vouchers without sending or saving.")
     mode.add_argument("--test-telegram", action="store_true", help="Send one labeled preview without hunting.")
-    parser.add_argument("--state", type=Path, default=STATE_PATH, help="Alert history path (default: seen.json).")
+    mode.add_argument("--remind", action="store_true", help="Remind about claim times in the next five minutes.")
+    parser.add_argument("--state", type=Path, help="History path (default: seen.json or reminders.json).")
     args = parser.parse_args()
     try:
         if args.test_telegram:
@@ -197,8 +247,10 @@ def main() -> int:
             sample = Voucher("Shopee Mall", "12H-18H: Giảm 50K cho đơn từ 199K", "MAVIDU50K", "https://shopee.vn/")
             send_telegram(*telegram_config(), render_alert(today, [sample], preview=True))
             print("Telegram accepted the test message.")
+        elif args.remind:
+            remind(args.state or REMINDER_STATE_PATH)
         else:
-            hunt(args.state, args.dry_run)
+            hunt(args.state or STATE_PATH, args.dry_run)
     except (HuntError, SourceError) as error:
         print(error, file=sys.stderr)
         return 1
