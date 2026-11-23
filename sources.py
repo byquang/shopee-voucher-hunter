@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 
 SOURCE_URL = "https://magiamgia.com/shopee/"
 VIETNAM = ZoneInfo("Asia/Ho_Chi_Minh")
+DAILY_WIDGET = ".elementor-widget-toggle[data-id='7a6eca0']"
 DAY_HEADING = re.compile(r"\bMã Shopee\b.{0,80}?\bNgày\s+(\d{1,2})[/.](\d{1,2})(?:[/.](\d{4}))?\b", re.I)
 DISCOUNT = re.compile(r"(?:giảm\s+\d|freeship|miễn phí vận chuyển|hoàn\s+\d.*xu)", re.I)
 CODE = re.compile(r"[A-Z0-9][A-Z0-9_-]{3,31}", re.I)
@@ -56,44 +57,40 @@ def parse_vouchers(page: bytes, today: date) -> list[Voucher]:
     except (TypeError, ValueError, KeyError):
         raise SourceError("Missing or invalid source update date.") from None
 
-    dated_panels = []
-    for title in soup.select(".elementor-tab-title[aria-controls]"):
-        match = DAY_HEADING.search(title.get_text(" ", strip=True))
-        if match:
-            day, month, year = match.groups()
-            dated_panels.append((int(day), int(month), int(year) if year else None, title["aria-controls"]))
-    if not dated_panels:
-        raise SourceError("The source no longer has dated voucher sections.")
-    if not today - timedelta(days=1) <= modified_day <= today:
+    daily = soup.select_one(DAILY_WIDGET)
+    title = daily.select_one(".elementor-tab-title[aria-controls]") if daily else None
+    match = DAY_HEADING.search(title.get_text(" ", strip=True)) if title else None
+    if not match:
+        raise SourceError("The source no longer has its daily voucher section.")
+    day, month, year = match.groups()
+    is_today = (int(day), int(month), int(year) if year else today.year) == (today.day, today.month, today.year)
+    if not is_today or not today - timedelta(days=1) <= modified_day <= today:
         return []
 
+    panel = daily.find(id=title["aria-controls"], class_="elementor-tab-content")
+    if panel is None:
+        raise SourceError("The source's current voucher section is missing.")
     vouchers = []
-    for day, month, year, panel_id in dated_panels:
-        if (day, month, year or today.year) != (today.day, today.month, today.year):
+    category, claim = "", ""
+    for row in panel.find_all(["p", "li"]):
+        copy = row.find(attrs={"data-clipboard-text": True})
+        code = copy["data-clipboard-text"].strip().upper() if copy else ""
+        code = code if CODE.fullmatch(code) else ""
+        links = [link for a in row.find_all("a", href=True) if (link := shopee_url(a["href"]))]
+        for a in row.find_all("a", href=True):
+            if a.get_text(strip=True).startswith(("http://", "https://")):
+                a.decompose()
+        raw = " ".join(row.get_text(" ", strip=True).split())
+        if raw.startswith("🔴"):
+            category = raw.removeprefix("🔴").strip(" :")[:65]
+            claim = links[0] if links else ""
             continue
-        panel = soup.find(id=panel_id, class_="elementor-tab-content")
-        if panel is None:
-            raise SourceError("The source's current voucher section is missing.")
-        category, claim = "", ""
-        for row in panel.find_all(["p", "li"]):
-            copy = row.find(attrs={"data-clipboard-text": True})
-            code = copy["data-clipboard-text"].strip().upper() if copy else ""
-            code = code if CODE.fullmatch(code) else ""
-            links = [link for a in row.find_all("a", href=True) if (link := shopee_url(a["href"]))]
-            for a in row.find_all("a", href=True):
-                if a.get_text(strip=True).startswith(("http://", "https://")):
-                    a.decompose()
-            raw = " ".join(row.get_text(" ", strip=True).split())
-            if raw.startswith("🔴"):
-                category = raw.removeprefix("🔴").strip(" :")[:65]
-                claim = links[0] if links else ""
-                continue
-            if raw.startswith(("📌", "🎁", "📝", "**")) or not DISCOUNT.search(raw):
-                continue
-            if any(marker in raw.casefold() for marker in ("đã hết hạn", "đã hết lượt")):
-                continue
-            url = links[0] if links else claim
-            if code or url:
-                terms = raw.strip("►• :>-")
-                vouchers.append(Voucher(category, terms[:220], code, url))
+        if raw.startswith(("📌", "🎁", "📝", "**")) or not DISCOUNT.search(raw):
+            continue
+        if any(marker in raw.casefold() for marker in ("đã hết hạn", "đã hết lượt")):
+            continue
+        url = links[0] if links else claim
+        if code or url:
+            terms = raw.strip("►• :>-")
+            vouchers.append(Voucher(category, terms[:220], code, url))
     return vouchers

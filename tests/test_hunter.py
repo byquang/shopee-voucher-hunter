@@ -38,7 +38,11 @@ CURRENT = section("79+ Mã Shopee Ngày 23/11", "current", """
 """)
 OLD = section("Mã Shopee Từ 9H-21H Ngày 22.11", "old",
               "<p><span data-clipboard-text=YESTERDAY>YESTERDAY</span> giảm 90%</p>")
-PAGE = (f'<meta property="article:modified_time" content="{STAMP}">' + CURRENT + OLD).encode()
+PAGE = (
+    f'<meta property="article:modified_time" content="{STAMP}">'
+    f'<div class="elementor-widget-toggle" data-id="7a6eca0">{CURRENT}</div>'
+    f'<div class="elementor-widget-toggle" data-id="archived">{OLD}</div>'
+).encode()
 EXPECTED = [
     Voucher("SHOPEE VIP", "9H-12H: Lưu banner mã giảm 25% tối đa 200K", url="https://shopee.vn/m/vip#123"),
     Voucher("MÃ MALL", "MALL50K giảm 50K đơn từ 199K", code="MALL50K"),
@@ -52,6 +56,11 @@ class SourceTests(unittest.TestCase):
     def test_stale_page_or_prior_year_produces_no_alerts(self):
         self.assertEqual(parse_vouchers(PAGE, date(2027, 11, 23)), [])
         self.assertEqual(parse_vouchers(PAGE.replace(b"23/11", b"23/11/2025"), TODAY), [])
+
+    def test_same_day_and_month_in_archive_never_contributes(self):
+        self.assertEqual(parse_vouchers(PAGE.replace(b"22.11", b"23.11"), TODAY), EXPECTED)
+        only_archive_matches = PAGE.replace(b"23/11", b"22/11").replace(b"22.11", b"23.11")
+        self.assertEqual(parse_vouchers(only_archive_matches, TODAY), [])
 
     def test_source_layout_error_is_not_reported_as_an_empty_listing(self):
         with self.assertRaises(SourceError):
