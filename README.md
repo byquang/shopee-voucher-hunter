@@ -19,17 +19,16 @@ Gemini hay máy chủ riêng; bot không tự lưu voucher hoặc mua hàng.
 
 ## Cách hoạt động
 
-- GitHub Actions chạy vào phút 07 và 37 mỗi giờ; GitHub có thể chạy trễ hoặc bỏ
-  qua lượt. Trên repo công khai, GitHub có thể tắt lịch sau 60 ngày không hoạt
-  động; vào **Actions** để bật lại nếu cần.
+- GitHub Actions quét voucher mới vào phút 07 và 37 mỗi giờ. Trên repo công khai,
+  GitHub có thể tắt lịch sau 60 ngày không hoạt động; vào **Actions** để bật lại.
 - Bot chỉ đọc mục của ngày hiện tại (giờ Việt Nam) trên Mã Giảm Giá. Mỗi lượt
   gửi tối đa 10 voucher mới; nếu không có mục mới, bot không gửi tin.
-- Bot kiểm tra lịch nhắc ở phút 25 và 55 mỗi giờ, để nhắc trước tối đa 5 phút
-  cho các mốc mở voucher vào đầu giờ hoặc giữa giờ được nguồn ghi rõ. Nhắc mốc
-  00:00 chỉ khi nguồn đã đăng danh sách ngày mới. Nếu GitHub chạy trễ qua
-  giờ mở hoặc nguồn chưa đăng giờ, bot không gửi nhắc. Không tự lưu voucher.
-- Mỗi voucher chỉ được nhắc một lần cho mỗi giờ mở; lịch sử nhắc được lưu riêng
-  trong `reminders.json`. Có thể chạy `reminders` thủ công để kiểm tra giờ sắp mở.
+- Bot kiểm tra giờ mở mỗi 10 phút và nhắc sớm tối đa 55 phút, để còn lượt dự
+  phòng nếu GitHub chạy trễ hoặc bỏ lượt. Chỉ nhắc giờ được nguồn công bố; nếu
+  nguồn đăng muộn hoặc mọi lượt đều lỡ giờ mở, bot không gửi nhắc.
+- Bot gửi một tin mỗi mốc giờ mở, hiển thị tối đa 10 voucher và dẫn đến nguồn
+  nếu còn ưu đãi khác. Lịch sử nhắc được lưu riêng trong `reminders.json`. Có
+  thể chạy `reminders` thủ công để kiểm tra giờ sắp mở.
 - Bot ghi ngày và mã băm của voucher vào `seen.json` trên nhánh mặc định sau khi
   Telegram xác nhận. Workflow cần quyền ghi vào nhánh để lưu lịch sử. Voucher
   được đăng lại ngày hôm sau có thể được gửi lại; lỗi lưu lịch sử sau khi gửi có
