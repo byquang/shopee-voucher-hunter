@@ -126,6 +126,12 @@ class TelegramTests(unittest.TestCase):
         self.assertNotIn("ưu đãi mới", message)
         self.assertNotIn("Nguồn:", message)
 
+    def test_alert_preserves_discount_amount_that_matches_code(self):
+        voucher = Voucher("Mall", "Giảm 100K cho đơn từ 299K", "100K")
+        message = hunter.render_alert(TODAY, [voucher])
+        self.assertIn("Giảm <b>100K</b> cho đơn từ 299K", message)
+        self.assertIn("Mã: <code>100K</code>", message)
+
 
 @patch("hunter.fetch_source", return_value=PAGE)
 @patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "123:fake", "TELEGRAM_CHAT_ID": "-10042"})

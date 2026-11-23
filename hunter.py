@@ -130,9 +130,8 @@ def render_voucher(index: int, voucher: Voucher) -> str:
     if schedule:
         terms = terms[schedule.end():]
     if voucher.code:
-        pattern = rf"(?<!\w){re.escape(voucher.code)}(?!\w)"
-        terms = re.sub(pattern, "", terms, count=1, flags=re.I).strip(" :–-\t")
-        terms = " ".join(terms.split())
+        prefix = rf"^{re.escape(voucher.code)}(?:$|[\s:–]+)"
+        terms = re.sub(prefix, "", terms, count=1, flags=re.I)
     if terms:
         lines.append(format_terms(terms))
     if voucher.code:
