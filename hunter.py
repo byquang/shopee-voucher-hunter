@@ -21,7 +21,7 @@ REMINDER_STATE_PATH = Path("reminders.json")
 USER_AGENT = "ShopeeVoucherHunter/1.0 (+https://github.com/byquang/shopee-voucher-hunter)"
 CLAIM_TIME = r"(?:[01]?\d|2[0-3])(?:H(?:[0-5]\d)?|:[0-5]\d)"
 TIME_PREFIX = re.compile(rf"^({CLAIM_TIME}(?:\s*[-–,]\s*{CLAIM_TIME})*)\s*:\s*", re.I)
-REMINDER_LEAD = timedelta(minutes=5)
+REMINDER_LEAD = timedelta(minutes=55)
 DISCOUNT_AMOUNT = re.compile(r"\b(?:giảm|hoàn)\s+(\d+(?:[.,]\d+)*\s*(?:%|₫|đ\b|k\b|tr\b|triệu\b))", re.I)
 
 
@@ -92,30 +92,50 @@ def offer_key(voucher: Voucher) -> str:
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False).encode()).hexdigest()
 
 
-def read_seen(path: Path, today: date) -> set[str]:
+def read_history(path: Path) -> dict | None:
     try:
         content = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(content, dict):
+            raise ValueError
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        raise HuntError("Could not read voucher alert history; no alert was sent.") from None
+    return content
+
+
+def parse_seen(content: dict) -> tuple[date, set[str]]:
+    try:
         day = date.fromisoformat(content["date"])
         keys = content["offers"]
         if not isinstance(keys, list) or any(
             not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{64}", key) for key in keys
         ):
             raise ValueError
-    except FileNotFoundError:
-        return set()
-    except (OSError, ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError):
         raise HuntError("Could not read voucher alert history; no alert was sent.") from None
-    return set(keys) if day == today else set()
+    return day, set(keys)
 
 
-def save_seen(path: Path, today: date, keys: set[str]) -> None:
+def read_seen(path: Path, today: date) -> set[str]:
+    content = read_history(path)
+    if content is None:
+        return set()
+    day, keys = parse_seen(content)
+    return keys if day == today else set()
+
+
+def save_history(path: Path, data: dict) -> None:
     temporary = path.with_suffix(".json.tmp")
     try:
-        data = {"date": today.isoformat(), "offers": sorted(keys)}
         temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         temporary.replace(path)
     except OSError:
         raise HuntError("Telegram accepted the alert, but history could not be saved.") from None
+
+
+def save_seen(path: Path, today: date, keys: set[str]) -> None:
+    save_history(path, {"date": today.isoformat(), "offers": sorted(keys)})
 
 
 def format_terms(terms: str) -> str:
@@ -183,30 +203,59 @@ def due_reminders(page: bytes, now: datetime) -> dict[datetime, dict[str, Vouche
 
 def render_reminder(slot: datetime, vouchers: list[Voucher]) -> str:
     sections = [f"⏰ <b>SẮP MỞ VOUCHER SHOPEE</b>\n<i>{slot:%H:%M} giờ Việt Nam · {len(vouchers)} ưu đãi</i>"]
-    sections.extend(render_voucher(index, voucher) for index, voucher in enumerate(vouchers, start=1))
+    sections.extend(render_voucher(index, voucher) for index, voucher in enumerate(vouchers[:MAX_PER_ALERT], start=1))
+    if len(vouchers) > MAX_PER_ALERT:
+        sections.append(f'Còn {len(vouchers) - MAX_PER_ALERT} ưu đãi khác trên <a href="{SOURCE_URL}">Mã Giảm Giá</a>.')
     sections.append("<i>Lượt có thể hết nhanh; kiểm tra điều kiện trong Shopee.</i>")
     return "\n\n".join(sections)
+
+
+def read_reminded(path: Path, now: datetime, due: dict[datetime, dict[str, Voucher]]) -> set[datetime]:
+    content = read_history(path)
+    if content is None:
+        return set()
+    if "slots" not in content:
+        day, keys = parse_seen(content)
+        if day not in (now.date(), now.date() - timedelta(days=1)):
+            return set()
+        return {slot for slot, offers in due.items() if keys.intersection(offers)}
+    try:
+        raw = content["slots"]
+        if not isinstance(raw, list):
+            raise ValueError
+        slots = {datetime.fromisoformat(value) for value in raw}
+        if any(slot.utcoffset() is None for slot in slots):
+            raise ValueError
+    except (ValueError, TypeError):
+        raise HuntError("Could not read voucher reminder history; no reminder was sent.") from None
+    return {slot for slot in slots if slot > now}
 
 
 def remind(path: Path) -> None:
     credentials = telegram_config()
     page = fetch_source()
     now = datetime.now(VIETNAM)
-    seen = read_seen(path, now.date())
-    sent = 0
-    for slot, offers in sorted(due_reminders(page, now).items()):
-        pending = [(key, voucher) for key, voucher in offers.items() if key not in seen]
-        for start in range(0, len(pending), MAX_PER_ALERT):
-            if sent:
-                sleep(1.1)
-            if datetime.now(VIETNAM) >= slot:
-                break
-            batch = dict(pending[start:start + MAX_PER_ALERT])
-            send_telegram(*credentials, render_reminder(slot, list(batch.values())))
-            seen.update(batch)
-            save_seen(path, now.date(), seen)
-            sent += len(batch)
-    print(f"Sent reminders for {sent} voucher(s)." if sent else "No voucher reminders due.")
+    due = due_reminders(page, now)
+    if not due:
+        print("No voucher reminders due.")
+        return
+    reminded = read_reminded(path, now, due)
+    sent = False
+    for slot, offers in sorted(due.items()):
+        label = f"{slot:%Y-%m-%d %H:%M} (Vietnam)"
+        if slot in reminded:
+            print(f"Reminder already sent for {label}.")
+            continue
+        if sent:
+            sleep(1.1)
+        if datetime.now(VIETNAM) >= slot:
+            print(f"Skipped past claim slot {label}.")
+            continue
+        send_telegram(*credentials, render_reminder(slot, list(offers.values())))
+        reminded.add(slot)
+        save_history(path, {"slots": sorted(value.isoformat() for value in reminded)})
+        print(f"Telegram accepted the reminder for {label}; {len(offers)} voucher(s).")
+        sent = True
 
 
 def hunt(path: Path, dry_run: bool) -> None:
@@ -238,7 +287,7 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Preview source vouchers without sending or saving.")
     mode.add_argument("--test-telegram", action="store_true", help="Send one labeled preview without hunting.")
-    mode.add_argument("--remind", action="store_true", help="Remind about claim times in the next five minutes.")
+    mode.add_argument("--remind", action="store_true", help="Remind about upcoming claim times.")
     parser.add_argument("--state", type=Path, help="History path (default: seen.json or reminders.json).")
     args = parser.parse_args()
     try:

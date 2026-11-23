@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from contextlib import ExitStack, redirect_stdout
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -139,15 +139,21 @@ class ReminderTests(unittest.TestCase):
 
     def test_reminders_match_future_slots_once_per_slot(self):
         page = PAGE.replace(b"9H-12H", b"9H-12H30, 18:00")
-        morning = hunter.due_reminders(page, self.moment(8, 55))
+        morning = hunter.due_reminders(page, self.moment(8, 5))
         midday = hunter.due_reminders(page, self.moment(12, 28))
         evening = hunter.due_reminders(page, self.moment(17, 59))
         self.assertEqual(list(morning), [self.moment(9, 0)])
         self.assertEqual(list(midday), [self.moment(12, 30)])
         self.assertEqual(list(evening), [self.moment(18, 0)])
         self.assertNotEqual(morning[self.moment(9, 0)].keys(), evening[self.moment(18, 0)].keys())
-        self.assertFalse(hunter.due_reminders(page, self.moment(8, 54, 59)))
+        self.assertFalse(hunter.due_reminders(page, self.moment(8, 4, 59)))
         self.assertFalse(hunter.due_reminders(page, self.moment(9, 0)))
+
+    def test_reminder_survives_a_missed_run_and_a_thirty_minute_delay(self):
+        # The 08:07 check was dropped; the 08:17 check starts at 08:47.
+        scheduled = self.moment(8, 17)
+        arrived = scheduled + timedelta(minutes=30)
+        self.assertEqual(list(hunter.due_reminders(PAGE, arrived)), [self.moment(9, 0)])
 
     def test_midnight_only_uses_tomorrows_published_vouchers(self):
         today_page = PAGE.replace(b"9H-12H", b"0H")
@@ -163,17 +169,65 @@ class ReminderTests(unittest.TestCase):
         with ExitStack() as stack:
             path = Path(stack.enter_context(tempfile.TemporaryDirectory())) / "reminders.json"
             stack.enter_context(patch("hunter.telegram_config", return_value=("123:fake", "-10042")))
-            stack.enter_context(patch("hunter.fetch_source", return_value=PAGE))
+            stack.enter_context(patch("hunter.fetch_source", side_effect=[PAGE, PAGE.replace(b"200K", b"300K")]))
             sender = stack.enter_context(patch("hunter.send_telegram"))
             clock = stack.enter_context(patch("hunter.datetime", wraps=datetime))
             stack.enter_context(redirect_stdout(io.StringIO()))
-            clock.now.return_value = self.moment(8, 56)
+            clock.now.return_value = self.moment(8, 7)
             hunter.remind(path)
+            clock.now.return_value = self.moment(8, 47)
             hunter.remind(path)
             sender.assert_called_once()
             self.assertIn("09:00 giờ Việt Nam · 1 ưu đãi", sender.call_args.args[2])
-            self.assertEqual(len(hunter.read_seen(path, TODAY)), 1)
+            self.assertEqual(json.loads(path.read_text()), {"slots": [self.moment(9, 0).isoformat()]})
             self.assertFalse(path.with_name("seen.json").exists())
+
+    def test_reminders_do_not_repeat_after_midnight(self):
+        page = PAGE.replace(b"9H-12H", b"0H30").replace(b"23/11", b"24/11")
+        with ExitStack() as stack:
+            path = Path(stack.enter_context(tempfile.TemporaryDirectory())) / "reminders.json"
+            stack.enter_context(patch("hunter.telegram_config", return_value=("123:fake", "-10042")))
+            stack.enter_context(patch("hunter.fetch_source", return_value=page))
+            sender = stack.enter_context(patch("hunter.send_telegram"))
+            clock = stack.enter_context(patch("hunter.datetime", wraps=datetime))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            clock.now.return_value = self.moment(23, 41)
+            hunter.remind(path)
+            clock.now.return_value = self.moment(0, 7) + timedelta(days=1)
+            hunter.remind(path)
+            sender.assert_called_once()
+
+    def test_legacy_reminder_history_suppresses_repeat_during_rollout(self):
+        now = self.moment(8, 56)
+        due = hunter.due_reminders(PAGE, now)
+        slot = self.moment(9, 0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "reminders.json"
+            hunter.save_seen(path, TODAY, set(due[slot]))
+            self.assertEqual(hunter.read_reminded(path, now, due), {slot})
+
+    def test_failing_delivery_can_retry_on_the_next_run(self):
+        with ExitStack() as stack:
+            path = Path(stack.enter_context(tempfile.TemporaryDirectory())) / "reminders.json"
+            stack.enter_context(patch("hunter.telegram_config", return_value=("123:fake", "-10042")))
+            stack.enter_context(patch("hunter.fetch_source", return_value=PAGE))
+            sender = stack.enter_context(patch("hunter.send_telegram", side_effect=[hunter.HuntError("failed"), None]))
+            clock = stack.enter_context(patch("hunter.datetime", wraps=datetime))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            clock.now.return_value = self.moment(8, 7)
+            with self.assertRaises(hunter.HuntError):
+                hunter.remind(path)
+            self.assertFalse(path.exists())
+            clock.now.return_value = self.moment(8, 47)
+            hunter.remind(path)
+            self.assertEqual(sender.call_count, 2)
+            self.assertTrue(path.exists())
+
+    def test_reminder_lists_truncated_offers_in_one_message(self):
+        message = hunter.render_reminder(self.moment(9, 0), EXPECTED * 6)
+        self.assertIn("09:00 giờ Việt Nam · 12 ưu đãi", message)
+        self.assertEqual(message.count("SHOPEE VIP"), 5)
+        self.assertIn("Còn 2 ưu đãi khác", message)
 
     def test_reminder_expiring_during_run_is_not_sent(self):
         with ExitStack() as stack:

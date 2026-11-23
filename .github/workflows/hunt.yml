@@ -4,7 +4,7 @@ on:
   pull_request:
   schedule:
     - cron: '7,37 * * * *'
-    - cron: '25,55 * * * *'
+    - cron: '17,27,47,57 * * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -71,7 +71,14 @@ jobs:
             python hunter.py --test-telegram
           elif [[ "$GITHUB_EVENT_NAME" == schedule && ( -z "$TELEGRAM_BOT_TOKEN" || -z "$TELEGRAM_CHAT_ID" ) ]]; then
             echo '::notice::Add the Telegram repository secrets to enable scheduled alerts.'
-          elif [[ "$HUNT_MODE" == reminders || "$SCHEDULE" == '25,55 * * * *' ]]; then
+          elif [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            status=0
+            python hunter.py --remind || status=$?
+            if [[ "$SCHEDULE" == '7,37 * * * *' ]]; then
+              python hunter.py || status=$?
+            fi
+            exit "$status"
+          elif [[ "$HUNT_MODE" == reminders ]]; then
             python hunter.py --remind
           else
             python hunter.py
