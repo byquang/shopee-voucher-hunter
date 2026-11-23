@@ -12,7 +12,8 @@ Gemini hay máy chủ riêng; bot không tự lưu voucher hoặc mua hàng.
    [GitHub Actions secrets](https://github.com/byquang/shopee-voucher-hunter/settings/secrets/actions).
    Không dán giá trị vào code hoặc workflow.
 3. Vào [Shopee Voucher Hunter](https://github.com/byquang/shopee-voucher-hunter/actions/workflows/hunt.yml)
-   → **Run workflow** → `test-telegram` để nhận một tin nhắn xác nhận.
+   → **Run workflow** → `test-telegram` để nhận một bản xem trước tin nhắn.
+   Mã trong bản xem trước chỉ dùng để minh họa.
    Sau đó chọn `hunt` để săn ngay, hoặc chờ lịch. Chọn `preview` nếu chỉ muốn
    xem kết quả trong log, không gửi tin và không cần secret.
 

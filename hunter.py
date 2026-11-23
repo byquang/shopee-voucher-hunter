@@ -17,6 +17,8 @@ MAX_PER_ALERT = 10
 PAGE_LIMIT = 2 * 1024 * 1024
 STATE_PATH = Path("seen.json")
 USER_AGENT = "ShopeeVoucherHunter/1.0 (+https://github.com/byquang/shopee-voucher-hunter)"
+TIME_PREFIX = re.compile(r"^([0-2]?\dH(?:\d{2})?(?:\s*[-–,]\s*[0-2]?\dH(?:\d{2})?)*)\s*:\s*", re.I)
+DISCOUNT_AMOUNT = re.compile(r"\b(?:giảm|hoàn)\s+(\d+(?:[.,]\d+)*\s*(?:%|₫|đ\b|k\b|tr\b|triệu\b))", re.I)
 
 
 class HuntError(Exception):
@@ -112,21 +114,51 @@ def save_seen(path: Path, today: date, keys: set[str]) -> None:
         raise HuntError("Telegram accepted the alert, but history could not be saved.") from None
 
 
-def render_alert(today: date, vouchers: list[Voucher]) -> str:
-    lines = [f"<b>Voucher Shopee Việt Nam · {today:%d/%m/%Y}</b>"]
-    for voucher in vouchers:
-        title = f"<b>{escape(voucher.category)}</b> · " if voucher.category else ""
-        terms = escape(voucher.terms)
-        if voucher.code:
-            code = escape(voucher.code)
-            if code in terms:
-                terms = terms.replace(code, f"<code>{code}</code>", 1)
-            else:
-                terms = f"<code>{code}</code> · {terms}"
-        claim = f' · <a href="{escape(voucher.url)}">Mở Shopee</a>' if voucher.url else ""
-        lines.append(f"• {title}{terms}{claim}")
-    lines.append(f'Nguồn: <a href="{SOURCE_URL}">Mã Giảm Giá</a>. Kiểm tra điều kiện và lượt còn lại trên Shopee.')
-    return "\n\n".join(lines)
+def format_terms(terms: str) -> str:
+    discount = DISCOUNT_AMOUNT.search(terms)
+    if not discount:
+        return escape(terms)
+    start, end = discount.span(1)
+    return f"{escape(terms[:start])}<b>{escape(terms[start:end])}</b>{escape(terms[end:])}"
+
+
+def render_voucher(index: int, voucher: Voucher) -> str:
+    category = escape(voucher.category or "Ưu đãi Shopee")
+    lines = [f"{index:02d} · <b>{category}</b>"]
+    terms = voucher.terms
+    schedule = TIME_PREFIX.match(terms)
+    if schedule:
+        terms = terms[schedule.end():]
+    if voucher.code:
+        pattern = rf"(?<!\w){re.escape(voucher.code)}(?!\w)"
+        terms = re.sub(pattern, "", terms, count=1, flags=re.I).strip(" :–-\t")
+        terms = " ".join(terms.split())
+    if terms:
+        lines.append(format_terms(terms))
+    if voucher.code:
+        lines.append(f"Mã: <code>{escape(voucher.code)}</code>")
+    links = []
+    if schedule:
+        links.append(f"<i>Khung giờ: {escape(schedule[1])}</i>")
+    if voucher.url:
+        links.append(f'<a href="{escape(voucher.url)}">Mở trên Shopee ↗</a>')
+    if links:
+        lines.append(" · ".join(links))
+    return "\n".join(lines)
+
+
+def render_alert(today: date, vouchers: list[Voucher], *, preview: bool = False) -> str:
+    label = "Tin nhắn thử · Mã minh họa không dùng được" if preview else f"{len(vouchers)} ưu đãi mới"
+    sections = [f"🛍️ <b>VOUCHER SHOPEE VIỆT NAM</b>\n<i>{today:%d/%m/%Y} · {label}</i>"]
+    sections.extend(render_voucher(index, voucher) for index, voucher in enumerate(vouchers, start=1))
+    if preview:
+        sections.append("<i>Kết nối Telegram thành công.</i>")
+    else:
+        sections.append(
+            f'Nguồn: <a href="{SOURCE_URL}">Mã Giảm Giá</a>\n'
+            "<i>Kiểm tra điều kiện và lượt còn lại trên Shopee.</i>"
+        )
+    return "\n\n".join(sections)
 
 
 def hunt(path: Path, dry_run: bool) -> None:
@@ -157,12 +189,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check today's Shopee Vietnam vouchers.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Preview source vouchers without sending or saving.")
-    mode.add_argument("--test-telegram", action="store_true", help="Send one setup confirmation without hunting.")
+    mode.add_argument("--test-telegram", action="store_true", help="Send one labeled preview without hunting.")
     parser.add_argument("--state", type=Path, default=STATE_PATH, help="Alert history path (default: seen.json).")
     args = parser.parse_args()
     try:
         if args.test_telegram:
-            send_telegram(*telegram_config(), "<b>Shopee Voucher Hunter</b> đã kết nối Telegram.")
+            today = datetime.now(VIETNAM).date()
+            sample = Voucher("Shopee Mall", "12H-18H: Giảm 50K cho đơn từ 199K", "MAVIDU50K", "https://shopee.vn/")
+            send_telegram(*telegram_config(), render_alert(today, [sample], preview=True))
             print("Telegram accepted the test message.")
         else:
             hunt(args.state, args.dry_run)

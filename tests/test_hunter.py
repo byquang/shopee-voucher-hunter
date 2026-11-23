@@ -106,6 +106,26 @@ class TelegramTests(unittest.TestCase):
         self.assertIn("A &amp; B", message)
         self.assertIn("?a=1&amp;b=2", message)
 
+    def test_alert_separates_savings_code_hours_and_claim_link(self):
+        voucher = Voucher("Mall", "9H-12H: mall50k giảm 50K đơn từ 199K", "MALL50K", "https://shp.ee/mall")
+        message = hunter.render_alert(TODAY, [voucher, EXPECTED[0]])
+        self.assertIn("23/11/2026 · 2 ưu đãi mới", message)
+        self.assertIn(
+            '01 · <b>Mall</b>\ngiảm <b>50K</b> đơn từ 199K\nMã: <code>MALL50K</code>\n'
+            '<i>Khung giờ: 9H-12H</i> · <a href="https://shp.ee/mall">Mở trên Shopee ↗</a>',
+            message,
+        )
+        self.assertIn("02 · <b>SHOPEE VIP</b>", message)
+        self.assertIn("giảm <b>25%</b>", message)
+        self.assertNotIn("Mã: <code></code>", message)
+
+    def test_telegram_preview_is_clearly_marked_as_a_sample(self):
+        message = hunter.render_alert(TODAY, EXPECTED, preview=True)
+        self.assertIn("Tin nhắn thử · Mã minh họa không dùng được", message)
+        self.assertIn("Kết nối Telegram thành công.", message)
+        self.assertNotIn("ưu đãi mới", message)
+        self.assertNotIn("Nguồn:", message)
+
 
 @patch("hunter.fetch_source", return_value=PAGE)
 @patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "123:fake", "TELEGRAM_CHAT_ID": "-10042"})
